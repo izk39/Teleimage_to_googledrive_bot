@@ -1,5 +1,4 @@
-# bot.py
-
+# bot.py (updated)
 import os
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filters
@@ -7,7 +6,7 @@ from datetime import datetime, timedelta
 import logging
 import asyncio
 from dotenv import load_dotenv
-from google_module import store_to_google_sheet  # your custom module
+from google_module import store_to_google_sheet
 import nest_asyncio
 
 nest_asyncio.apply()
@@ -25,7 +24,6 @@ async def download_photo(file_id, context: ContextTypes.DEFAULT_TYPE):
     file = await context.bot.get_file(file_id)
     return await file.download_as_bytearray()
 
-# Handle images
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
@@ -46,7 +44,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "caption": update.message.caption,
         "message_id": update.message.message_id,
         "username": update.effective_user.username,
-        "photo_data": photo_data,  # Store the actual image data
+        "photo_data": photo_data,
     }
 
     if chat_id not in image_cache:
@@ -62,7 +60,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     logging.info(f"Cached image from user {user_id} in chat {chat_id}")
 
-# Handle follow-up text
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
@@ -77,20 +74,18 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     user_record = {
-        "username": update.effective_user.username,
+        "user": update.effective_user,
         "image_file_id": cached["photo_file_id"],
         "caption": cached["caption"],
         "follow_up_text": update.message.text,
         "image_meta": cached["image_meta"],
-        "text_timestamp": update.message.date.isoformat()
     }
 
-    store_to_google_sheet(chat_id, user_record)
+    await store_to_google_sheet(chat_id, user_record, context)  # Add await
     del image_cache[chat_id][user_id]
 
     logging.info(f"Stored follow-up for user {user_id} in chat {chat_id}")
 
-# Main entrypoint
 async def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
@@ -99,14 +94,9 @@ async def main():
 
     await app.run_polling()
 
-# Run the bot
 if __name__ == '__main__':
     try:
-        loop = asyncio.get_running_loop()
-        import nest_asyncio
-        nest_asyncio.apply()  # Patch the existing loop
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
-    loop.run_until_complete(main())
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(main())
+    except KeyboardInterrupt:
+        pass
