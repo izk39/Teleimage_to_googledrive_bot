@@ -27,6 +27,7 @@ async def download_photo(file_id, context: ContextTypes.DEFAULT_TYPE):
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
+    message_date = update.message.date  # This is timezone-aware UTC
 
     if not update.message.photo:
         return
@@ -38,7 +39,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     photo_data = await download_photo(file_id, context)
 
     metadata = {
-        "date": update.message.date.isoformat(),
+        "date": message_date.isoformat(),
         "file_id": file_id,
         "file_unique_id": unique_id,
         "caption": update.message.caption,

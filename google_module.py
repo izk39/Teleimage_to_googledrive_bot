@@ -1,7 +1,8 @@
 # google_module.py (updated)
 import os
 import io
-from datetime import datetime  # ADD THIS IMPORT
+import pytz
+from datetime import datetime, timezone  # ADD THIS IMPORT
 from dotenv import load_dotenv
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -53,8 +54,12 @@ def format_datetime_for_sheets(dt_str):
     try:
         dt = datetime.fromisoformat(dt_str)
         # Format: MM/DD/YYYY HH:MM:SS (24-hour format)
-        return dt.strftime('%m/%d/%Y %H:%M:%S')
-    except (ValueError, TypeError):
+        local_tz = pytz.timezone('America/Mexico_City') 
+        local_dt = dt.astimezone(local_tz)
+
+        return local_dt.strftime('%m/%d/%Y %H:%M:%S')
+    except (ValueError, TypeError) as e:
+        print(f"Error formatting datetime: {e}")
         return dt_str  # Return original if parsing fails
 
 def get_or_create_folder(parent_id, folder_name):
