@@ -20,6 +20,11 @@ logging.basicConfig(level=logging.INFO)
 # Temporary in-memory image cache
 image_cache = {}
 
+async def download_photo(file_id, context: ContextTypes.DEFAULT_TYPE):
+    """Download photo from Telegram servers"""
+    file = await context.bot.get_file(file_id)
+    return await file.download_as_bytearray()
+
 # Handle images
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -32,6 +37,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file_id = photo.file_id
     unique_id = photo.file_unique_id
 
+    photo_data = await download_photo(file_id, context)
+
     metadata = {
         "date": update.message.date.isoformat(),
         "file_id": file_id,
@@ -39,6 +46,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "caption": update.message.caption,
         "message_id": update.message.message_id,
         "username": update.effective_user.username,
+        "photo_data": photo_data,  # Store the actual image data
     }
 
     if chat_id not in image_cache:

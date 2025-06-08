@@ -1,14 +1,25 @@
+# google_module.py (updated)
 import os
+import io
 from dotenv import load_dotenv
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+from googleapiclient.http import MediaIoBaseUpload
+from PIL import Image
 
 # Load .env variables
 load_dotenv()
 
 SERVICE_ACCOUNT_FILE = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE")
 ROOT_FOLDER_ID = os.getenv("GOOGLE_DRIVE_ROOT_FOLDER_ID")
+
+print("DEBUG: SERVICE_ACCOUNT_FILE =", SERVICE_ACCOUNT_FILE)
+print("DEBUG: ROOT_FOLDER_ID =", ROOT_FOLDER_ID)
+
+if not SERVICE_ACCOUNT_FILE:
+    raise RuntimeError("Missing GOOGLE_SERVICE_ACCOUNT_FILE in environment.")
+
 SCOPES = [
     'https://www.googleapis.com/auth/drive',
     'https://www.googleapis.com/auth/spreadsheets'
@@ -37,7 +48,6 @@ def get_or_create_sheet_for_chat(chat_id):
         spreadsheet_body = {
             'properties': {'title': str(chat_id)},
         }
-        # File creation does not take "parents" in Sheets API; you use Drive API to move it later if needed
         spreadsheet = sheets_service.spreadsheets().create(body=spreadsheet_body).execute()
         sheet_id = spreadsheet['spreadsheetId']
 
@@ -52,10 +62,44 @@ def get_or_create_sheet_for_chat(chat_id):
     sheet_cache[chat_id] = sheet_id
     return sheet_id
 
+def upload_image_to_drive(image_data, filename, folder_id):
+    """Upload image to Google Drive and return shareable link"""
+    file_metadata = {
+        'name': filename,
+        'parents': [folder_id]
+    }
+    
+    # Convert bytearray to file-like object
+    media = MediaIoBaseUpload(io.BytesIO(image_data), 
+                            mimetype='image/jpeg',
+                            resumable=True)
+    
+    file = drive_service.files().create(
+        body=file_metadata,
+        media_body=media,
+        fields='id, webViewLink'
+    ).execute()
+    
+    # Make the file publicly viewable
+    drive_service.permissions().create(
+        fileId=file['id'],
+        body={'type': 'anyone', 'role': 'reader'}
+    ).execute()
+    
+    return file['webViewLink']
+
 def store_to_google_sheet(chat_id, user_data):
     sheet_id = get_or_create_sheet_for_chat(chat_id)
-    sheet_range = 'A1'  # We'll append, so the range doesn't matter
+    
+    # Upload the image to Drive first
+    image_data = user_data.get("image_meta", {}).get("photo_data")
+    if image_data:
+        filename = f"{user_data.get('username', 'unknown')}_{user_data.get('image_meta', {}).get('file_unique_id', '')}.jpg"
+        image_url = upload_image_to_drive(image_data, filename, ROOT_FOLDER_ID)
+    else:
+        image_url = "No image"
 
+    # Prepare the row data with image formula
     row = [
         user_data.get("username"),
         user_data.get("image_file_id"),
@@ -64,16 +108,59 @@ def store_to_google_sheet(chat_id, user_data):
         user_data.get("image_meta", {}).get("date"),
         user_data.get("image_meta", {}).get("file_unique_id"),
         user_data.get("image_meta", {}).get("message_id"),
-        user_data.get("text_timestamp")
+        user_data.get("text_timestamp"),
+        image_url,  # Direct link to image
+        f'=IMAGE("{image_url}")' if image_url != "No image" else "No image"  # This will display the image in the cell
     ]
 
     try:
+        # First, ensure we have headers
+        headers = [
+            "Username", "File ID", "Caption", "Follow-up Text", 
+            "Date", "Unique ID", "Message ID", "Text Timestamp",
+            "Image URL", "Image"
+        ]
+        
+        # Check if sheet is empty (need to add headers)
+        result = sheets_service.spreadsheets().values().get(
+            spreadsheetId=sheet_id,
+            range='A1:Z1'
+        ).execute()
+        
+        if 'values' not in result:
+            # Add headers
+            sheets_service.spreadsheets().values().update(
+                spreadsheetId=sheet_id,
+                range='A1',
+                valueInputOption="RAW",
+                body={"values": [headers]}
+            ).execute()
+        
+        # Append the new row
         sheets_service.spreadsheets().values().append(
             spreadsheetId=sheet_id,
-            range=sheet_range,
-            valueInputOption="RAW",
+            range='A1',
+            valueInputOption="USER_ENTERED",  # Changed to USER_ENTERED to process formulas
             insertDataOption="INSERT_ROWS",
             body={"values": [row]}
         ).execute()
+        
+        # Auto-resize columns to fit images
+        sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=sheet_id,
+            body={
+                "requests": [{
+                    "autoResizeDimensions": {
+                        "dimensions": {
+                            "sheetId": 0,
+                            "dimension": "COLUMNS",
+                            "startIndex": 0,
+                            "endIndex": len(headers)
+                        }
+                    }
+                }]
+            }
+        ).execute()
+        
     except HttpError as e:
         print(f"Failed to append row: {e}")
