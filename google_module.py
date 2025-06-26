@@ -63,24 +63,33 @@ def format_datetime_for_sheets(dt_str):
         return dt_str  # Return original if parsing fails
 
 def get_or_create_folder(parent_id, folder_name):
-    """Get or create a folder with the given name"""
-    # Sanitize folder name to remove invalid characters
+    print(f"[DEBUG] Checking folder '{folder_name}' in '{parent_id}'")
     folder_name = "".join(c for c in folder_name if c not in r'\/:*?"<>|')
     
     query = f"'{parent_id}' in parents and name = '{folder_name}' and mimeType = 'application/vnd.google-apps.folder'"
-    results = drive_service.files().list(q=query, fields="files(id, name)").execute()
-    folders = results.get('files', [])
+    try:
+        results = drive_service.files().list(q=query, fields="files(id, name)").execute()
+        folders = results.get('files', [])
+        if folders:
+            print(f"[DEBUG] Found existing folder: {folders[0]['name']} (ID: {folders[0]['id']})")
+            return folders[0]['id']
+    except Exception as e:
+        print(f"[ERROR] Error searching for folder: {e}")
 
-    if folders:
-        return folders[0]['id']
-    else:
+    # Create folder if not found
+    try:
         folder_metadata = {
             'name': folder_name,
             'mimeType': 'application/vnd.google-apps.folder',
             'parents': [parent_id]
         }
-        folder = drive_service.files().create(body=folder_metadata, fields='id').execute()
+        folder = drive_service.files().create(body=folder_metadata, fields='id, name').execute()
+        print(f"[DEBUG] Created folder: {folder['name']} (ID: {folder['id']})")
         return folder['id']
+    except Exception as e:
+        print(f"[ERROR] Error creating folder: {e}")
+        raise
+
 
 def get_or_create_sheet(chat_id, chat_name):
     """Get or create a spreadsheet with the chat name and ID"""
@@ -134,6 +143,8 @@ def get_or_create_sheet(chat_id, chat_name):
         ).execute()
 
     sheet_cache[chat_id] = sheet_id
+    print(f"[DEBUG] Created sheet '{chat_name}' with ID: {sheet_id}")
+
     return sheet_id
 
 def upload_image_to_drive(image_data, filename, folder_id):
@@ -141,6 +152,9 @@ def upload_image_to_drive(image_data, filename, folder_id):
     # Sanitize filename
     filename = "".join(c for c in filename if c not in r'\/:*?"<>|')
     
+    if isinstance(image_data, bytearray):
+        image_data = bytes(image_data) 
+
     file_metadata = {
         'name': filename,
         'parents': [folder_id]
@@ -165,6 +179,16 @@ def upload_image_to_drive(image_data, filename, folder_id):
     return file['webViewLink']
 
 async def store_to_google_sheet(chat_id, user_data, context):  # Make this async
+    try:
+        folder = drive_service.files().get(
+            fileId=ROOT_FOLDER_ID,
+            fields="id,name"
+        ).execute()
+        print(f"[DEBUG] Using folder: {folder['name']} (ID: {folder['id']})")
+    except Exception as e:
+        print(f"❌ Folder error: {e}")
+        raise
+
     """Store data with proper naming and organization"""
     chat_name = await get_chat_name(chat_id, context)  # Add await
     user_name = get_user_name(user_data['user'])
@@ -182,7 +206,6 @@ async def store_to_google_sheet(chat_id, user_data, context):  # Make this async
         image_url = upload_image_to_drive(image_data, filename, chat_folder_id)
     else:
         image_url = "No image"
-
 
     # Prepare the row data with formatted date
     row = [
@@ -259,6 +282,10 @@ async def store_to_google_sheet(chat_id, user_data, context):  # Make this async
                 ]
             }
         ).execute()
-        
+
+        print(f"[DEBUG] Writing row to sheet: {row}")
+        print(f"[DEBUG] Target sheet ID: {sheet_id}")
+
     except HttpError as e:
         print(f"Failed to append row: {e}")
+        print(f"[ERROR] Google Sheets API error: {e}")
