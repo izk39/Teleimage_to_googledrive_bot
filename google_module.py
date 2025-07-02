@@ -1,8 +1,8 @@
-# google_module.py (updated)
+# google_module.py
 import os
 import io
 import pytz
-from datetime import datetime, timezone  # ADD THIS IMPORT
+from datetime import datetime
 from dotenv import load_dotenv
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -13,9 +13,6 @@ load_dotenv()
 
 SERVICE_ACCOUNT_FILE = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE")
 ROOT_FOLDER_ID = os.getenv("GOOGLE_DRIVE_ROOT_FOLDER_ID")
-
-if not SERVICE_ACCOUNT_FILE:
-    raise RuntimeError("Missing GOOGLE_SERVICE_ACCOUNT_FILE in environment.")
 
 SCOPES = [
     'https://www.googleapis.com/auth/drive',
@@ -31,17 +28,18 @@ sheets_service = build('sheets', 'v4', credentials=creds)
 sheet_cache = {}
 folder_cache = {}
 
-async def get_chat_name(chat_id, context):  # Make this async
-    """Get chat title from Telegram API"""
+def sanitize_filename(name):
+    return "".join(c for c in name if c not in r'\\/:*?"<>|')
+
+async def get_chat_name(chat_id, context):
     try:
-        chat = await context.bot.get_chat(chat_id)  # Add await
+        chat = await context.bot.get_chat(chat_id)
         return chat.title or f"Chat_{chat_id}"
     except Exception as e:
         print(f"Error getting chat name: {e}")
         return f"Chat_{chat_id}"
 
 def get_user_name(user):
-    """Get user's display name"""
     if user.username:
         return f"@{user.username}"
     elif user.first_name or user.last_name:
@@ -50,164 +48,100 @@ def get_user_name(user):
         return f"User_{user.id}"
 
 def format_datetime_for_sheets(dt_str):
-    """Convert ISO datetime string to Google Sheets datetime format"""
     try:
         dt = datetime.fromisoformat(dt_str)
-        # Format: MM/DD/YYYY HH:MM:SS (24-hour format)
-        local_tz = pytz.timezone('America/Mexico_City') 
+        local_tz = pytz.timezone('America/Mexico_City')
         local_dt = dt.astimezone(local_tz)
-
         return local_dt.strftime('%m/%d/%Y %H:%M:%S')
-    except (ValueError, TypeError) as e:
-        print(f"Error formatting datetime: {e}")
-        return dt_str  # Return original if parsing fails
+    except Exception as e:
+        print(f"Datetime formatting error: {e}")
+        return dt_str
 
 def get_or_create_folder(parent_id, folder_name):
-    print(f"[DEBUG] Checking folder '{folder_name}' in '{parent_id}'")
-    folder_name = "".join(c for c in folder_name if c not in r'\/:*?"<>|')
-    
+    folder_name = sanitize_filename(folder_name)
     query = f"'{parent_id}' in parents and name = '{folder_name}' and mimeType = 'application/vnd.google-apps.folder'"
     try:
         results = drive_service.files().list(q=query, fields="files(id, name)").execute()
         folders = results.get('files', [])
         if folders:
-            print(f"[DEBUG] Found existing folder: {folders[0]['name']} (ID: {folders[0]['id']})")
             return folders[0]['id']
     except Exception as e:
-        print(f"[ERROR] Error searching for folder: {e}")
+        print(f"[ERROR] Error searching folder: {e}")
 
-    # Create folder if not found
     try:
         folder_metadata = {
             'name': folder_name,
             'mimeType': 'application/vnd.google-apps.folder',
             'parents': [parent_id]
         }
-        folder = drive_service.files().create(body=folder_metadata, fields='id, name').execute()
-        print(f"[DEBUG] Created folder: {folder['name']} (ID: {folder['id']})")
+        folder = drive_service.files().create(body=folder_metadata, fields='id').execute()
         return folder['id']
     except Exception as e:
         print(f"[ERROR] Error creating folder: {e}")
         raise
 
+def get_or_create_sheet(chat_id, sheet_name):
+    key = f"{chat_id}:{sheet_name}"
+    if key in sheet_cache:
+        return sheet_cache[key]
 
-def get_or_create_sheet(chat_id, chat_name):
-    """Get or create a spreadsheet with the chat name and ID"""
-    if chat_id in sheet_cache:
-        return sheet_cache[chat_id]
-
-    # First create/get the chat folder
-    chat_folder_id = get_or_create_folder(ROOT_FOLDER_ID, chat_name)
-    
-    # Check for existing sheet in this folder
-    query = f"'{chat_folder_id}' in parents and name = '{chat_name}' and mimeType = 'application/vnd.google-apps.spreadsheet'"
+    folder_id = get_or_create_folder(ROOT_FOLDER_ID, sheet_name)
+    query = f"'{folder_id}' in parents and name = '{sheet_name}' and mimeType = 'application/vnd.google-apps.spreadsheet'"
     results = drive_service.files().list(q=query, fields="files(id, name)").execute()
     files = results.get('files', [])
 
     if files:
         sheet_id = files[0]['id']
     else:
-        spreadsheet_body = {
-            'properties': {'title': chat_name},
-        }
-        spreadsheet = sheets_service.spreadsheets().create(body=spreadsheet_body).execute()
+        spreadsheet = sheets_service.spreadsheets().create(
+            body={'properties': {'title': sheet_name}}
+        ).execute()
         sheet_id = spreadsheet['spreadsheetId']
-
-        # Move spreadsheet to the chat folder
         drive_service.files().update(
             fileId=sheet_id,
-            addParents=chat_folder_id,
+            addParents=folder_id,
             removeParents='root',
             fields='id, parents'
         ).execute()
 
-        # Format the header row
-        sheets_service.spreadsheets().batchUpdate(
-            spreadsheetId=sheet_id,
-            body={
-                "requests": [
-                    {
-                        "repeatCell": {
-                            "range": {"sheetId": 0, "startRowIndex": 0, "endRowIndex": 1},
-                            "cell": {
-                                "userEnteredFormat": {
-                                    "backgroundColor": {"red": 0.8, "green": 0.8, "blue": 0.8},
-                                    "textFormat": {"bold": True}
-                                }
-                            },
-                            "fields": "userEnteredFormat"
-                        }
-                    }
-                ]
-            }
-        ).execute()
-
-    sheet_cache[chat_id] = sheet_id
-    print(f"[DEBUG] Created sheet '{chat_name}' with ID: {sheet_id}")
-
+    sheet_cache[key] = sheet_id
     return sheet_id
 
 def upload_image_to_drive(image_data, filename, folder_id):
-    """Upload image to specific folder and return shareable link"""
-    # Sanitize filename
-    filename = "".join(c for c in filename if c not in r'\/:*?"<>|')
-    
+    filename = sanitize_filename(filename)
     if isinstance(image_data, bytearray):
-        image_data = bytes(image_data) 
+        image_data = bytes(image_data)
 
-    file_metadata = {
+    metadata = {
         'name': filename,
         'parents': [folder_id]
     }
-    
-    media = MediaIoBaseUpload(io.BytesIO(image_data), 
-                            mimetype='image/jpeg',
-                            resumable=True)
-    
-    file = drive_service.files().create(
-        body=file_metadata,
-        media_body=media,
-        fields='id, webViewLink'
-    ).execute()
-    
-    # Make the file publicly viewable
+
+    media = MediaIoBaseUpload(io.BytesIO(image_data), mimetype='application/octet-stream', resumable=True)
+    file = drive_service.files().create(body=metadata, media_body=media, fields='id, webViewLink').execute()
+
     drive_service.permissions().create(
         fileId=file['id'],
         body={'type': 'anyone', 'role': 'reader'}
     ).execute()
-    
+
     return file['webViewLink']
 
-async def store_to_google_sheet(chat_id, user_data, context):  # Make this async
-    try:
-        folder = drive_service.files().get(
-            fileId=ROOT_FOLDER_ID,
-            fields="id,name"
-        ).execute()
-        print(f"[DEBUG] Using folder: {folder['name']} (ID: {folder['id']})")
-    except Exception as e:
-        print(f"❌ Folder error: {e}")
-        raise
-
-    """Store data with proper naming and organization"""
-    chat_name = await get_chat_name(chat_id, context)  # Add await
+async def store_to_google_sheet(chat_id, user_data, context):
+    chat_name = await get_chat_name(chat_id, context)
     user_name = get_user_name(user_data['user'])
-    
-    # Get or create the chat folder and sheet
     sheet_id = get_or_create_sheet(chat_id, chat_name)
-    chat_folder_id = get_or_create_folder(ROOT_FOLDER_ID, chat_name)
-    
-    # Upload the image to the chat's folder
+    folder_id = get_or_create_folder(ROOT_FOLDER_ID, chat_name)
+
     image_data = user_data.get("image_meta", {}).get("photo_data")
     if image_data:
         timestamp = user_data.get("image_meta", {}).get("date", "")
         formatted_date = format_datetime_for_sheets(timestamp)
         filename = f"{user_name}_{formatted_date.replace('/', '-').replace(':', '-')}.jpg"
-        image_url = upload_image_to_drive(image_data, filename, chat_folder_id)
+        image_url = upload_image_to_drive(image_data, filename, folder_id)
     else:
         image_url = "No image"
 
-    # Prepare the row data with formatted date
     row = [
         user_name,
         user_data.get("caption", ""),
@@ -217,75 +151,77 @@ async def store_to_google_sheet(chat_id, user_data, context):  # Make this async
         f'=IMAGE("{image_url}")' if image_url != "No image" else "No image"
     ]
 
-    try:
-        # First, ensure we have headers
-        headers = ["User", "Caption", "Follow-up Text", "Date", "Image URL", "Image"]
-        
-        # Check if sheet is empty (need to add headers)
-        result = sheets_service.spreadsheets().values().get(
-            spreadsheetId=sheet_id,
-            range='A1:Z1'
-        ).execute()
-        
-        if 'values' not in result:
-            # Add headers
-            sheets_service.spreadsheets().values().update(
-                spreadsheetId=sheet_id,
-                range='A1',
-                valueInputOption="RAW",
-                body={"values": [headers]}
-            ).execute()
-        
-        # Append the new row
-        sheets_service.spreadsheets().values().append(
+    headers = ["User", "Caption", "Follow-up Text", "Date", "Image URL", "Image"]
+
+    result = sheets_service.spreadsheets().values().get(
+        spreadsheetId=sheet_id,
+        range='A1:Z1'
+    ).execute()
+
+    if 'values' not in result:
+        sheets_service.spreadsheets().values().update(
             spreadsheetId=sheet_id,
             range='A1',
-            valueInputOption="USER_ENTERED",
-            insertDataOption="INSERT_ROWS",
-            body={"values": [row]}
+            valueInputOption="RAW",
+            body={"values": [headers]}
         ).execute()
-        
-        # Auto-resize columns and format date column
-        sheets_service.spreadsheets().batchUpdate(
+
+    sheets_service.spreadsheets().values().append(
+        spreadsheetId=sheet_id,
+        range='A1',
+        valueInputOption="USER_ENTERED",
+        insertDataOption="INSERT_ROWS",
+        body={"values": [row]}
+    ).execute()
+
+async def store_indicadores_to_drive_and_sheet(chat_id, user_id, session, context):
+    chat_name = await get_chat_name(chat_id, context)
+    user = await context.bot.get_chat_member(chat_id, user_id)
+    user_name = get_user_name(user.user)
+
+    folder_id = get_or_create_folder(ROOT_FOLDER_ID, chat_name)
+    indicadores_folder = get_or_create_folder(folder_id, "Indicadores")
+    sheet_id = get_or_create_sheet(chat_id * 1000 + 1, f"{chat_name}_Indicadores")
+
+    file_links = []
+    for idx, f in enumerate(session.get("files", [])):
+        filename = f.get("file_name", f"{user_name}_file_{idx}.bin")
+        link = upload_image_to_drive(f["data"], filename, indicadores_folder)
+        file_links.append(link)
+
+    row = [
+        user_name,
+        *[session["parsed_data"].get(k, "") for k in [
+            "Visitas Planeadas", "Visitas Realizadas", "OC Extra",
+            "Cotizaciones", "Detalle de la venta", "Clientes Nuevos"
+        ]],
+        ", ".join(file_links) if file_links else "No OC Adjunta"
+    ]
+
+    headers = [
+        "Usuario", "Visitas Planeadas", "Visitas Realizadas", "OC Extra",
+        "Cotizaciones", "Detalle de la venta", "Clientes Nuevos", "Links Adjuntos"
+    ]
+
+    result = sheets_service.spreadsheets().values().get(
+        spreadsheetId=sheet_id,
+        range='A1:Z1'
+    ).execute()
+
+    if 'values' not in result:
+        sheets_service.spreadsheets().values().update(
             spreadsheetId=sheet_id,
-            body={
-                "requests": [
-                    {
-                        "autoResizeDimensions": {
-                            "dimensions": {
-                                "sheetId": 0,
-                                "dimension": "COLUMNS",
-                                "startIndex": 0,
-                                "endIndex": len(headers)
-                            }
-                        }
-                    },
-                    {
-                        "repeatCell": {
-                            "range": {
-                                "sheetId": 0,
-                                "startRowIndex": 1,
-                                "startColumnIndex": 3,  # Date column (D)
-                                "endColumnIndex": 4
-                            },
-                            "cell": {
-                                "userEnteredFormat": {
-                                    "numberFormat": {
-                                        "type": "DATE_TIME",
-                                        "pattern": "mm/dd/yyyy hh:mm:ss"
-                                    }
-                                }
-                            },
-                            "fields": "userEnteredFormat.numberFormat"
-                        }
-                    }
-                ]
-            }
+            range='A1',
+            valueInputOption="RAW",
+            body={"values": [headers]}
         ).execute()
 
-        print(f"[DEBUG] Writing row to sheet: {row}")
-        print(f"[DEBUG] Target sheet ID: {sheet_id}")
+    sheets_service.spreadsheets().values().append(
+        spreadsheetId=sheet_id,
+        range='A1',
+        valueInputOption="USER_ENTERED",
+        insertDataOption="INSERT_ROWS",
+        body={"values": [row]}
+    ).execute()
 
-    except HttpError as e:
-        print(f"Failed to append row: {e}")
-        print(f"[ERROR] Google Sheets API error: {e}")
+    await context.bot.send_message(chat_id, f"✅ Indicadores guardados correctamente.\nLinks: {' | '.join(file_links) if file_links else 'No OC enviada'}")
